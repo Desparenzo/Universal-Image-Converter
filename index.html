@@ -1,9 +1,11 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Bulk Universal Image Converter</title>
+    <title>Universal Image Converter</title>
+    <!-- Include heic2any library for HEIC/HEIF support -->
+    <script src="https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js"></script>
     <style>
         :root {
             --primary: #10b981;
@@ -190,20 +192,63 @@
         ::-webkit-scrollbar-track { background: var(--bg); border-radius: 4px; }
         ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
         ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+        /* Progress Bar (WinRAR Style Dual Bars) */
+        .progress-container {
+            display: none;
+            margin-bottom: 1rem;
+            width: 100%;
+            background: rgba(0,0,0,0.2);
+            padding: 1.2rem;
+            border-radius: 12px;
+            border: 1px solid var(--border);
+            box-sizing: border-box;
+        }
+        .progress-group {
+            margin-bottom: 1rem;
+        }
+        .progress-group:last-child {
+            margin-bottom: 0;
+        }
+        .progress-label {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            margin-bottom: 0.5rem;
+            display: flex;
+            justify-content: space-between;
+            font-weight: 500;
+        }
+        .progress-bar-bg {
+            background-color: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            height: 12px;
+            overflow: hidden;
+            width: 100%;
+        }
+        .progress-bar-fill {
+            background-color: var(--primary);
+            height: 100%;
+            width: 0%;
+            transition: width 0.15s ease;
+        }
+        .file-progress-fill {
+            background-color: #3b82f6; /* Blue for individual file to distinguish */
+        }
     </style>
 </head>
 <body>
 
     <div class="container">
         <h1>Bulk Image Converter</h1>
-        <p class="subtitle">Drop multiple files. Convert the whole batch at highest quality.</p>
+        <p class="subtitle">Drag & Drop or Browse Files.</p>
 
         <div class="drop-zone" id="dropZone">
             <div class="drop-zone-text" id="dropZoneText">
                 <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-bottom: 10px; color: #10b981;"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="12" y1="18" x2="12" y2="12"></line><line x1="9" y1="15" x2="15" y2="15"></line></svg><br>
-                Drag & Drop images here<br>or click to browse
+                Drag & Drop images (incl. HEIC) here<br>or click to browse
             </div>
-            <input type="file" id="fileInput" accept="image/*" multiple>
+            <input type="file" id="fileInput" accept="image/*,.heic,.heif" multiple>
         </div>
 
         <div class="preview-grid" id="previewGrid"></div>
@@ -233,6 +278,27 @@
             </div>
         </div>
 
+        <div id="progressContainer" class="progress-container">
+            <div class="progress-group">
+                <div class="progress-label">
+                    <span id="overallProgressText">Total Progress</span>
+                    <span id="overallProgressPercent">0%</span>
+                </div>
+                <div class="progress-bar-bg">
+                    <div class="progress-bar-fill" id="overallProgressBarFill"></div>
+                </div>
+            </div>
+            <div class="progress-group">
+                <div class="progress-label">
+                    <span id="fileProgressText">Current File</span>
+                    <span id="fileProgressPercent">0%</span>
+                </div>
+                <div class="progress-bar-bg">
+                    <div class="progress-bar-fill file-progress-fill" id="fileProgressBarFill"></div>
+                </div>
+            </div>
+        </div>
+
         <button id="convertBtn" class="action-btn">Convert All Files</button>
     </div>
 
@@ -249,8 +315,42 @@
         const bgColor = document.getElementById('bgColor');
         const bgColorRow = document.getElementById('bgColorRow');
 
-        // Array to hold our image data
-        let imageQueue = [];
+        const progressContainer = document.getElementById('progressContainer');
+        const overallProgressText = document.getElementById('overallProgressText');
+        const overallProgressPercent = document.getElementById('overallProgressPercent');
+        const overallProgressBarFill = document.getElementById('overallProgressBarFill');
+        
+        const fileProgressText = document.getElementById('fileProgressText');
+        const fileProgressPercent = document.getElementById('fileProgressPercent');
+        const fileProgressBarFill = document.getElementById('fileProgressBarFill');
+
+        // Queue changed to only hold lightweight File references, saving gigabytes of RAM
+        let fileQueue = [];
+
+        // Helper to allow the browser to paint UI updates before heavy blocking operations
+        const yieldToMain = () => new Promise(r => setTimeout(r, 20));
+
+        function showProgress() {
+            progressContainer.style.display = 'block';
+            updateOverallProgress(0, 'Initializing...');
+            updateFileProgress(0, 'Waiting...');
+        }
+
+        function updateOverallProgress(percent, text) {
+            overallProgressBarFill.style.width = `${percent}%`;
+            overallProgressPercent.innerText = `${Math.round(percent)}%`;
+            if (text) overallProgressText.innerText = text;
+        }
+
+        function updateFileProgress(percent, text) {
+            fileProgressBarFill.style.width = `${percent}%`;
+            fileProgressPercent.innerText = `${Math.round(percent)}%`;
+            if (text) fileProgressText.innerText = text;
+        }
+
+        function hideProgress() {
+            progressContainer.style.display = 'none';
+        }
 
         // --- UI Logic for Transparency ---
         function updateTransparencyUI() {
@@ -275,53 +375,90 @@
         formatSelect.addEventListener('change', updateTransparencyUI);
         preserveTransparency.addEventListener('change', updateTransparencyUI);
 
-        // --- File Handling Logic ---
-        function handleFiles(files) {
+        // --- File Handling Logic (Lazy Load) ---
+        async function handleFiles(files) {
             if (!files.length) return;
 
-            Array.from(files).forEach(file => {
-                if (!file.type.startsWith('image/')) return;
+            const filesArray = Array.from(files);
+            showProgress();
+            convertBtn.disabled = true;
+
+            // Simply queue the files in memory without decoding them yet
+            for (let i = 0; i < filesArray.length; i++) {
+                const file = filesArray[i];
+                
+                updateOverallProgress((i / filesArray.length) * 100, `Queuing files...`);
+                updateFileProgress((i / filesArray.length) * 100, `Adding: ${file.name}`);
+                
+                if (i % 15 === 0) await yieldToMain();
+
+                const isHeic = file.name.toLowerCase().endsWith('.heic') || file.name.toLowerCase().endsWith('.heif');
+                
+                if (!file.type.startsWith('image/') && !isHeic) continue;
 
                 const originalName = file.name.replace(/\.[^/.]+$/, ""); 
-                const reader = new FileReader();
+                const id = Date.now() + Math.random().toString(36).substr(2, 9);
+                
+                let previewUrl = null;
+                if (!isHeic) {
+                    previewUrl = URL.createObjectURL(file); // Cheap URL for standard files
+                }
 
-                reader.onload = function(event) {
-                    const img = new Image();
-                    img.onload = function() {
-                        // Create unique ID for the queue
-                        const id = Date.now() + Math.random().toString(36).substr(2, 9);
-                        
-                        imageQueue.push({
-                            id: id,
-                            originalName: originalName,
-                            image: img
-                        });
-
-                        renderGrid();
-                        updateUIState();
-                    };
-                    img.src = event.target.result;
-                };
-                reader.readAsDataURL(file);
-            });
+                fileQueue.push({
+                    id: id,
+                    originalName: originalName,
+                    file: file,
+                    isHeic: isHeic,
+                    previewUrl: previewUrl
+                });
+            }
+            
+            renderGrid();
+            updateOverallProgress(100, 'Finished queuing all files!');
+            updateFileProgress(100, 'Ready');
+            
+            setTimeout(() => {
+                hideProgress();
+                updateUIState();
+            }, 800);
         }
 
         function renderGrid() {
-            previewGrid.innerHTML = ''; // Clear grid
+            previewGrid.innerHTML = ''; 
             
-            imageQueue.forEach(item => {
+            fileQueue.forEach(item => {
                 const div = document.createElement('div');
                 div.className = 'preview-item';
                 
-                const img = document.createElement('img');
-                img.src = item.image.src;
+                if (item.isHeic) {
+                    // Safe placeholder for HEIC instead of crashing the browser decoding thumbnails
+                    const placeholder = document.createElement('div');
+                    placeholder.style.width = '100%';
+                    placeholder.style.height = '100%';
+                    placeholder.style.display = 'flex';
+                    placeholder.style.alignItems = 'center';
+                    placeholder.style.justifyContent = 'center';
+                    placeholder.style.backgroundColor = '#1e293b';
+                    placeholder.style.color = '#10b981';
+                    placeholder.style.fontWeight = 'bold';
+                    placeholder.style.fontSize = '1.2rem';
+                    placeholder.style.border = '1px solid #334155';
+                    placeholder.style.boxSizing = 'border-box';
+                    placeholder.innerText = 'HEIC';
+                    div.appendChild(placeholder);
+                } else {
+                    const img = document.createElement('img');
+                    img.src = item.previewUrl;
+                    div.appendChild(img);
+                }
                 
                 const removeBtn = document.createElement('button');
                 removeBtn.className = 'remove-btn';
                 removeBtn.innerHTML = '✕';
                 removeBtn.onclick = (e) => {
                     e.stopPropagation();
-                    imageQueue = imageQueue.filter(i => i.id !== item.id);
+                    if (item.previewUrl) URL.revokeObjectURL(item.previewUrl);
+                    fileQueue = fileQueue.filter(i => i.id !== item.id);
                     renderGrid();
                     updateUIState();
                 };
@@ -330,7 +467,6 @@
                 label.className = 'file-count';
                 label.innerText = item.originalName;
 
-                div.appendChild(img);
                 div.appendChild(removeBtn);
                 div.appendChild(label);
                 previewGrid.appendChild(div);
@@ -338,15 +474,16 @@
         }
 
         function updateUIState() {
-            if (imageQueue.length > 0) {
+            if (fileQueue.length > 0) {
                 dropZoneText.innerHTML = 'Drag & Drop <b>more</b> images here<br>or click to browse';
                 dropZone.style.padding = '1.5rem 1rem';
                 controls.style.display = 'block';
                 convertBtn.style.display = 'block';
-                convertBtn.innerText = `Convert ${imageQueue.length} File${imageQueue.length > 1 ? 's' : ''}`;
+                convertBtn.innerText = `Convert ${fileQueue.length} File${fileQueue.length > 1 ? 's' : ''}`;
+                convertBtn.disabled = false;
                 updateTransparencyUI();
             } else {
-                dropZoneText.innerHTML = '<svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-bottom: 10px; color: #10b981;"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="12" y1="18" x2="12" y2="12"></line><line x1="9" y1="15" x2="15" y2="15"></line></svg><br>Drag & Drop images here<br>or click to browse';
+                dropZoneText.innerHTML = '<svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-bottom: 10px; color: #10b981;"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="12" y1="18" x2="12" y2="12"></line><line x1="9" y1="15" x2="15" y2="15"></line></svg><br>Drag & Drop images (incl. HEIC) here<br>or click to browse';
                 dropZone.style.padding = '2.5rem 2rem';
                 controls.style.display = 'none';
                 convertBtn.style.display = 'none';
@@ -372,58 +509,150 @@
             handleFiles(e.dataTransfer.files);
         });
 
-        // --- Bulk Conversion Logic ---
-        convertBtn.addEventListener('click', function() {
-            if (imageQueue.length === 0) return;
+        // --- Bulk Conversion Logic (Strict Limit of 1 Memory Instance) ---
+        convertBtn.addEventListener('click', async function() {
+            if (fileQueue.length === 0) return;
 
             convertBtn.disabled = true;
             convertBtn.innerText = 'Processing...';
+            showProgress();
 
             const targetFormat = formatSelect.value;
             let extension = targetFormat === 'image/jpeg' ? 'jpg' : (targetFormat === 'image/webp' ? 'webp' : 'png');
 
-            // Process sequentially to prevent browser crashing or blocking multiple downloads
-            imageQueue.forEach((item, index) => {
-                setTimeout(() => {
-                    const canvas = document.createElement('canvas');
-                    const ctx = canvas.getContext('2d');
-                    
-                    canvas.width = item.image.width;
-                    canvas.height = item.image.height;
+            // Strictly process 1 item at a time, triggering download, then flushing RAM
+            for (let i = 0; i < fileQueue.length; i++) {
+                const item = fileQueue[i];
+                
+                updateOverallProgress((i / fileQueue.length) * 100, `Converting batch (${i + 1} of ${fileQueue.length})`);
+                updateFileProgress(10, `Processing: ${item.originalName}`);
+                await yieldToMain(); 
 
-                    if (!preserveTransparency.checked) {
-                        ctx.fillStyle = bgColor.value;
-                        ctx.fillRect(0, 0, canvas.width, canvas.height);
-                    }
+                let processedFile = item.file;
 
-                    ctx.drawImage(item.image, 0, 0);
-
-                    canvas.toBlob(function(blob) {
-                        const url = URL.createObjectURL(blob);
-                        const a = document.createElement('a');
-                        a.style.display = 'none';
-                        a.href = url;
-                        a.download = `${item.originalName}_HQ.${extension}`;
+                // Decode HEIC directly before generating the canvas
+                if (item.isHeic) {
+                    try {
+                        updateFileProgress(40, `Decoding HEIC (Pass 1 - JPEG)...`);
+                        await yieldToMain(); 
                         
-                        document.body.appendChild(a);
-                        a.click();
+                        // Try JPEG decoding first to save memory
+                        const convertedBlob = await heic2any({
+                            blob: item.file,
+                            toType: "image/jpeg", 
+                            quality: 0.92 
+                        });
                         
-                        setTimeout(() => {
-                            window.URL.revokeObjectURL(url);
-                            a.remove();
-                        }, 100);
-
-                    }, targetFormat, 1.0);
-
-                    // Reset button after the last item is processed
-                    if (index === imageQueue.length - 1) {
-                        setTimeout(() => {
-                            convertBtn.disabled = false;
-                            convertBtn.innerText = `Convert ${imageQueue.length} File${imageQueue.length > 1 ? 's' : ''}`;
-                        }, 500);
+                        processedFile = Array.isArray(convertedBlob) ? convertedBlob[0] : convertedBlob;
+                    } catch (error) {
+                        console.warn("Error processing HEIC (JPEG Canvas Error), attempting PNG fallback:", error);
+                        
+                        // Fallback: The ERR_CANVAS happens when the browser's JPEG encoder rejects the internal 
+                        // canvas data due to size limitations. We fallback to PNG.
+                        try {
+                            updateFileProgress(45, `Decoding HEIC (Pass 2 - PNG Fallback)...`);
+                            await yieldToMain(); 
+                            
+                            const convertedBlob = await heic2any({
+                                blob: item.file,
+                                toType: "image/png" 
+                            });
+                            
+                            processedFile = Array.isArray(convertedBlob) ? convertedBlob[0] : convertedBlob;
+                        } catch (fallbackError) {
+                            console.error("Complete failure processing HEIC:", fallbackError);
+                            alert(`Skipping "${item.originalName}": This file is too large or unsupported by this browser's canvas limits.`);
+                            continue; // Skip to the next file cleanly
+                        }
                     }
-                }, index * 300); // 300ms delay between each download trigger
-            });
+                }
+
+                await new Promise((resolve) => {
+                    const reader = new FileReader();
+
+                    reader.onprogress = function(event) {
+                        if (event.lengthComputable) {
+                            const percent = 40 + ((event.loaded / event.total) * 20);
+                            updateFileProgress(percent, `Loading Image Data...`);
+                        }
+                    };
+
+                    reader.onload = function(event) {
+                        const img = new Image();
+                        img.onload = function() {
+                            let canvas = document.createElement('canvas');
+                            let ctx = canvas.getContext('2d');
+                            
+                            canvas.width = img.width;
+                            canvas.height = img.height;
+
+                            if (!preserveTransparency.checked) {
+                                ctx.fillStyle = bgColor.value;
+                                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                            }
+
+                            ctx.drawImage(img, 0, 0);
+                            
+                            updateFileProgress(80, `Encoding to ${extension.toUpperCase()}...`);
+
+                            // Allow UI to repaint
+                            setTimeout(() => {
+                                canvas.toBlob(function(blob) {
+                                    if (!blob) {
+                                        alert(`Failed to encode "${item.originalName}". The dimensions may exceed browser limits.`);
+                                        resolve(); // Proceed to next file
+                                        return;
+                                    }
+
+                                    updateFileProgress(100, `Downloading & Clearing RAM...`);
+                                    
+                                    const url = URL.createObjectURL(blob);
+                                    const a = document.createElement('a');
+                                    a.style.display = 'none';
+                                    a.href = url;
+                                    a.download = `${item.originalName}_HQ.${extension}`;
+                                    
+                                    document.body.appendChild(a);
+                                    a.click();
+                                    
+                                    // EXPLICIT MEMORY FLUSH: Force Browser GC
+                                    setTimeout(() => {
+                                        window.URL.revokeObjectURL(url);
+                                        a.remove();
+                                        
+                                        // Nullify heavy object references immediately
+                                        processedFile = null;
+                                        canvas.width = 0;
+                                        canvas.height = 0;
+                                        canvas = null;
+                                        ctx = null;
+                                        
+                                        resolve(); // Proceed safely to next file
+                                    }, 100);
+
+                                }, targetFormat, 1.0);
+                            }, 50);
+                        };
+                        img.onerror = resolve; 
+                        img.src = event.target.result;
+                    };
+                    reader.onerror = resolve; 
+                    reader.readAsDataURL(processedFile);
+                });
+                
+                // Extra pause at the very end of the file processing to allow JS Garbage Collection 
+                // to run before we allocate massive memory for the next HEIC file.
+                await new Promise(r => setTimeout(r, 600));
+            }
+
+            updateOverallProgress(100, 'All Files Processed & Downloaded!');
+            updateFileProgress(100, 'Memory Successfully Cleared');
+            
+            setTimeout(() => {
+                hideProgress();
+                convertBtn.disabled = false;
+                convertBtn.innerText = `Convert ${fileQueue.length} File${fileQueue.length > 1 ? 's' : ''}`;
+            }, 1500);
         });
     </script>
 </body>
